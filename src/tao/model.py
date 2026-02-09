@@ -8,9 +8,9 @@ class InstructionEncoder(nn.Module):
     def __init__(self, instruction_repr_dim,
                  type_vocab_size=157,
                  type_embed_dim=192,
-                 reg_linear_out=128,
-                 branch_linear_out=128,
-                 mem_linear_out=128,):
+                 reg_linear_out=192,
+                 branch_linear_out=192,
+                 mem_linear_out=192):
         super().__init__()
 
         self.type_embedding = nn.Embedding(type_vocab_size, type_embed_dim)

@@ -16,9 +16,9 @@ from pathlib import Path
 class TrainConfig:
     datasets: list[str]
 
-    hidden_dim: int = 1024
+    hidden_dim: int = 2048
 
-    lr: float = 1e-3
+    lr: float = 1e-5
     batch_size: int = 512
     window_size: int = 128
     max_grad_norm: float = 4.0

@@ -58,7 +58,7 @@ def collate_fn(batch):
     reg_bits = (reg >> shifts) & 1
     reg_fp_bits = (reg_fp >> shifts) & 1
     branch_hist_bits = (branch_hist >> shifts) & 1
-    label = torch.concat([
+    label = torch.cat([
         types,
         reg_bits,
         reg_fp_bits,

@@ -33,7 +33,7 @@ class InstructionEncoder(nn.Module):
         reg_repr = self.reg_linear(reg_feat)
         branch_repr = self.branch_linear(branch_feat)
         mem_repr = self.mem_linear(mem_feat)
-        concat = torch.concat((type_embed, reg_repr, branch_repr, mem_repr), dim=-1)
+        concat = torch.cat((type_embed, reg_repr, branch_repr, mem_repr), dim=-1)
         concat = F.silu(concat)
         inst_repr = self.inst_linear(concat)
         inst_repr = self.norm(inst_repr)
@@ -111,8 +111,9 @@ class MultiHeadSelfAttention(nn.Module):
         Q = self.RoPE.rotate_queries_or_keys(Q)
         K = self.RoPE.rotate_queries_or_keys(K)
         seq_len = x.shape[-2]
-        mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), 
-                          diagonal=self.window_size + 1)
+        mask = torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool)
+        mask = torch.triu(mask, diagonal=-self.window_size)
+        mask = torch.tril(mask)
         out = F.scaled_dot_product_attention(Q, K, V, mask)
         out = rearrange(out, "... h l d_v -> ... l (h d_v)")
         return self.out_proj(out)

@@ -83,10 +83,12 @@ class OverlappingSampler(Sampler):
         self.batch_size = batch_size
         self.overlap = overlap
         self.stride = batch_size - overlap
-    
+
     def __len__(self):
         return (self.len - self.overlap) // self.stride
-    
+
     def __iter__(self):
-        for start in range(0, self.len - self.batch_size + 1, self.stride):
+        shuffled_indices = torch.randperm(len(self))
+        for index in shuffled_indices:
+            start = index * self.stride
             yield range(start, start + self.batch_size)

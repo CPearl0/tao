@@ -18,8 +18,8 @@ class TrainConfig:
 
     hidden_dim: int = 2048
 
-    lr: float = 1e-5
-    batch_size: int = 512
+    lr: float = 2e-5
+    batch_size: int = 1024
     window_size: int = 128
     max_grad_norm: float = 4.0
     device: str = "cpu"
@@ -104,7 +104,7 @@ class Trainer:
         self.datasets = [TAODataset(f) for f in config.datasets]
         self.dataloaders = [DataLoader(
             dataset,
-            batch_sampler=OverlappingSampler(dataset, config.batch_size, config.window_size),
+            batch_sampler=OverlappingSampler(dataset, config.batch_size, config.window_size, True),
             collate_fn=collate_fn,
             num_workers=12,
             pin_memory=True
@@ -114,7 +114,7 @@ class Trainer:
         self.model = TAOModel(config.hidden_dim).to(self.device)
 
         self.optimizer = torch.optim.AdamW(self.model.parameters(), 
-                                           lr=config.lr * len(config.datasets))
+                                           lr=config.lr)
         if config.load_state_file:
             self.load_checkpoint(config.load_state_file)
         self.loss = MultiTaskLoss({
@@ -133,7 +133,6 @@ class Trainer:
         if not file:
             experiment_name = "TAO"
             timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-            Path("model").mkdir(parents=True, exist_ok=True)
             file = f"model/{experiment_name}-{timestamp}.model"
         checkpoint = {
             "model_state_dict": self.model.state_dict(),
@@ -150,6 +149,7 @@ class Trainer:
 
     def train(self):
         print("Starting training...")
+        Path("model").mkdir(parents=True, exist_ok=True)
         self.model.train()
         union_loader = zip(*self.dataloaders)
         length = min(len(dataloader) for dataloader in self.dataloaders)
@@ -176,6 +176,9 @@ class Trainer:
                 self.writer.add_scalar("train/loss_branch_mispred", loss["branch_mispredict"].item(), batch_idx)
                 self.writer.add_scalar("train/loss_dcache_hit", loss["dcache_hit"].item(), batch_idx)
                 self.writer.add_scalar("train/grad_norm", grad_norm, batch_idx)
+
+            if batch_idx % 10000 == 0:
+                self.save_checkpoint("model/latest.model")
 
         # Save the final model
         self.save_checkpoint()

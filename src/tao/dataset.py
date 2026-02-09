@@ -78,17 +78,22 @@ def collate_fn(batch):
 
 
 class OverlappingSampler(Sampler):
-    def __init__(self, data_source, batch_size, overlap):
+    def __init__(self, data_source, batch_size, overlap, shuffle: bool = False):
         self.len = len(data_source)
         self.batch_size = batch_size
         self.overlap = overlap
         self.stride = batch_size - overlap
+        self.shuffle = shuffle
 
     def __len__(self):
         return (self.len - self.overlap) // self.stride
 
     def __iter__(self):
-        shuffled_indices = torch.randperm(len(self))
-        for index in shuffled_indices:
-            start = index * self.stride
-            yield range(start, start + self.batch_size)
+        if self.shuffle:
+            shuffled_indices = torch.randperm(len(self))
+            for index in shuffled_indices:
+                start = index * self.stride
+                yield range(start, start + self.batch_size)
+        else:
+            for start in range(0, self.len - self.batch_size + 1, self.stride):
+                yield range(start, start + self.batch_size)

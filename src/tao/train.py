@@ -1,0 +1,207 @@
+from __future__ import annotations
+from src.tao.model import TAOModel
+from src.tao.dataset import TAODataset, OverlappingSampler, collate_fn
+from dataclasses import dataclass
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from einops import rearrange
+from tqdm import tqdm
+import argparse
+import datetime
+from pathlib import Path
+
+@dataclass
+class TrainConfig:
+    datasets: list[str]
+
+    hidden_dim: int = 1024
+
+    lr: float = 1e-3
+    batch_size: int = 512
+    window_size: int = 128
+    max_grad_norm: float = 4.0
+    device: str = "cpu"
+
+    load_state_file: str = ""
+
+
+class MSLELoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mse = nn.MSELoss()
+    
+    def forward(self, pred, true):
+        return self.mse(torch.log1p(pred), torch.log1p(true))
+
+
+class MultiTaskLoss(nn.Module):
+    """
+    多任务损失函数。
+
+    处理6个预测任务：
+    - fetch_cycle: MSLE Loss (回归)
+    - exec_cycle: MSLE Loss (回归)
+    - branch_mispredict: BCE Loss (二分类)
+    - tlb_hit: BCE Loss (二分类)
+    - icache_hit: BCE Loss (二分类)
+    - dcache_hit: CrossEntropy Loss (4分类)
+    """
+    def __init__(self, weights: dict[str, float | torch.Tensor], loss_start, device):
+        super().__init__()
+        self.weights = weights
+        self.device = torch.device(device)
+
+        self.loss_start = loss_start
+        self.msle_loss = MSLELoss()
+        self.bce_loss = nn.BCEWithLogitsLoss()
+        self.ce_loss = nn.CrossEntropyLoss()
+    
+    def forward(self, pred, target):
+        fetch_cycle_pred = pred["fetch_cycle"][..., self.loss_start:]
+        exec_cycle_pred = pred["exec_cycle"][..., self.loss_start:]
+        branch_mispredict_logits = pred["branch_mispred_logits"][..., self.loss_start:]
+        tlb_hit_logits = pred["tlb_hit_logits"][..., self.loss_start:]
+        icache_hit_logits = pred["icache_hit_logits"][..., self.loss_start:]
+        dcache_hit_logits = pred["dcache_hit_logits"][..., self.loss_start:, :]
+        
+        fetch_cycle_target = target[..., self.loss_start:, 0].float()
+        exec_cycle_target = target[..., self.loss_start:, 1].float()
+        branch_mispredict_target = target[..., self.loss_start:, 2].float()
+        tlb_hit_target = target[..., self.loss_start:, 3].float()
+        icache_hit_target = target[..., self.loss_start:, 4].float()
+        dcache_hit_target = target[..., self.loss_start:, 5].long()
+        
+        fetch_cycle_loss = self.msle_loss(fetch_cycle_pred, fetch_cycle_target)
+        exec_cycle_loss = self.msle_loss(exec_cycle_pred, exec_cycle_target)
+        branch_mispredict_loss = self.bce_loss(branch_mispredict_logits, branch_mispredict_target)
+        tlb_hit_loss = self.bce_loss(tlb_hit_logits, tlb_hit_target)
+        icache_hit_loss = self.bce_loss(icache_hit_logits, icache_hit_target)
+        dcache_hit_loss = self.ce_loss(
+            rearrange(dcache_hit_logits, "... c -> (...) c"),
+            rearrange(dcache_hit_target, "... -> (...)")
+        )
+
+        loss_dict: dict[str, torch.Tensor] = {
+            "fetch_cycle": fetch_cycle_loss,
+            "exec_cycle": exec_cycle_loss,
+            "branch_mispredict": branch_mispredict_loss,
+            "tlb_hit": tlb_hit_loss,
+            "icache_hit": icache_hit_loss,
+            "dcache_hit": dcache_hit_loss,
+        }
+        total_loss = torch.tensor(0.0, device=self.device)
+        for name, loss in loss_dict.items():
+            total_loss += self.weights[name] * loss
+        loss_dict["total"] = total_loss
+        return loss_dict
+
+
+class Trainer:
+    def __init__(self, config: TrainConfig):
+        self.config = config
+        self.datasets = [TAODataset(f) for f in config.datasets]
+        self.dataloaders = [DataLoader(
+            dataset,
+            batch_sampler=OverlappingSampler(dataset, config.batch_size, config.window_size),
+            collate_fn=collate_fn,
+            num_workers=12,
+            pin_memory=True
+        ) for dataset in self.datasets]
+
+        self.device = torch.device(config.device)
+        self.model = TAOModel(config.hidden_dim).to(self.device)
+
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), 
+                                           lr=config.lr * len(config.datasets))
+        if config.load_state_file:
+            self.load_checkpoint(config.load_state_file)
+        self.loss = MultiTaskLoss({
+            "fetch_cycle": 0.1,
+            "exec_cycle": 0.1,
+            "branch_mispredict": 1.0,
+            "tlb_hit": 1.0,
+            "icache_hit": 1.0,
+            "dcache_hit": 1.0,
+        }, config.window_size, config.device)
+        experiment_name = "TAO"
+        timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.writer = SummaryWriter(f"logs/{experiment_name}_{timestamp}")
+
+    def save_checkpoint(self, file: str = ""):
+        if not file:
+            experiment_name = "TAO"
+            timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            Path("model").mkdir(parents=True, exist_ok=True)
+            file = f"model/{experiment_name}_{timestamp}.model"
+        checkpoint = {
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict()
+        }
+        torch.save(checkpoint, file)
+        print(f"Model saved to {file}")
+
+    def load_checkpoint(self, file: str):
+        checkpoint = torch.load(file)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        print(f"Model loaded from {file}")
+
+    def train(self):
+        print("Starting training...")
+        self.model.train()
+        union_loader = zip(*self.dataloaders)
+        length = min(len(dataloader) for dataloader in self.dataloaders)
+        pbar = tqdm(union_loader, total=length, unit="batch")
+
+        for batch_idx, datas in enumerate(pbar):
+            losses: list[dict[str, torch.Tensor]] = []
+            for input, target in datas:
+                input: torch.Tensor = input.to(self.device, non_blocking=True)
+                target: torch.Tensor = target.to(self.device, non_blocking=True)
+
+                pred = self.model(input)
+                loss = self.loss(pred, target)
+                losses.append(loss)
+            loss: dict[str, torch.Tensor] = {k: sum(d[k] for d in losses) for k in losses[0]} # type: ignore
+
+            self.optimizer.zero_grad()
+            loss["total"].backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
+            self.optimizer.step()
+            
+            if batch_idx % 50 == 0:
+                pbar.set_postfix({
+                    "loss": f"{loss['total'].item():.3g}",
+                })
+                self.writer.add_scalar("train/loss_total", loss["total"].item(), batch_idx)
+                self.writer.add_scalar("train/loss_fetch_cycle", loss["fetch_cycle"].item(), batch_idx)
+                self.writer.add_scalar("train/loss_branch_mispred", loss["branch_mispredict"].item(), batch_idx)
+                self.writer.add_scalar("train/loss_dcache_hit", loss["dcache_hit"].item(), batch_idx)
+                self.writer.add_scalar("train/grad_norm", grad_norm, batch_idx)
+
+        # Save the final model
+        self.save_checkpoint()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=str, nargs="+") # Support multi datasets
+    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--model", type=str, default="")
+
+    args = parser.parse_args()
+
+    config = TrainConfig(
+        datasets=args.dataset,
+        device=args.device,
+        load_state_file=args.model
+    )
+    trainer = Trainer(config)
+
+    trainer.train()
+
+
+if __name__ == "__main__":
+    main()

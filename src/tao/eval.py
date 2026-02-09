@@ -11,7 +11,7 @@ import argparse
 class EvalConfig:
     datasets: list[str]
 
-    hidden_dim: int = 1024
+    hidden_dim: int = 2048
 
     batch_size: int = 512
     window_size: int = 128

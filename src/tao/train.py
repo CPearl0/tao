@@ -134,7 +134,7 @@ class Trainer:
             experiment_name = "TAO"
             timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
             Path("model").mkdir(parents=True, exist_ok=True)
-            file = f"model/{experiment_name}_{timestamp}.model"
+            file = f"model/{experiment_name}-{timestamp}.model"
         checkpoint = {
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict()
@@ -156,21 +156,17 @@ class Trainer:
         pbar = tqdm(union_loader, total=length, unit="batch")
 
         for batch_idx, datas in enumerate(pbar):
-            losses: list[dict[str, torch.Tensor]] = []
-            for input, target in datas:
-                input: torch.Tensor = input.to(self.device, non_blocking=True)
-                target: torch.Tensor = target.to(self.device, non_blocking=True)
+            input = torch.stack([data[0] for data in datas]).to(self.device, non_blocking=True) # type: ignore
+            target = torch.stack([data[1] for data in datas]).to(self.device, non_blocking=True) # type: ignore
 
-                pred = self.model(input)
-                loss = self.loss(pred, target)
-                losses.append(loss)
-            loss: dict[str, torch.Tensor] = {k: sum(d[k] for d in losses) for k in losses[0]} # type: ignore
+            pred = self.model(input)
+            loss = self.loss(pred, target)
 
             self.optimizer.zero_grad()
             loss["total"].backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
             self.optimizer.step()
-            
+
             if batch_idx % 50 == 0:
                 pbar.set_postfix({
                     "loss": f"{loss['total'].item():.3g}",
